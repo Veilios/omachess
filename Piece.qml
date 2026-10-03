@@ -9,9 +9,16 @@ Item {
     property string piece: ""
     property real pieceSize: 40
 
-    // White pieces: pure white
-    // Black pieces: theme's darkest background color (Color.background)
-    readonly property color fillColor: (piece.length > 0 && piece.toUpperCase() === piece) ? "#ffffff" : Color.background
+    readonly property bool isWhite: piece.length > 0 && piece.toUpperCase() === piece
+
+    // A flat fill cannot work on a two-tone board: with only two square
+    // shades, anything sitting between them is close to both, and the
+    // background tone sits almost exactly between. So each piece pairs its
+    // fill with an edge in the opposite tone — the standard chess-UI
+    // solution. White reads by its fill, black by its light edge, and both
+    // tones come from the palette so this survives a theme change.
+    readonly property color fillColor: isWhite ? Color.popups.text : Color.background
+    readonly property color outlineColor: isWhite ? Color.background : Color.popups.text
 
     width: pieceSize
     height: pieceSize
@@ -54,6 +61,8 @@ Item {
         font.weight: Font.Black
         font.pixelSize: root.pieceSize * 0.9
         color: root.fillColor
+        style: Text.Outline
+        styleColor: root.outlineColor
         renderType: Text.NativeRendering
     }
 }

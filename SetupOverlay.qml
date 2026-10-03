@@ -1,21 +1,17 @@
 import QtQuick
-import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 
 Item {
     id: root
-    Layout.alignment: Qt.AlignHCenter
-    Layout.preferredWidth: 296
-    Layout.preferredHeight: 296
     visible: false
 
-    signal startGame()
+    signal startRequested()
 
     Rectangle {
         anchors.fill: parent
         radius: Style.cornerRadius
-        color: Qt.rgba(0, 0, 0, 0.55)
+        color: Qt.rgba(Color.popups.background.r, Color.popups.background.g, Color.popups.background.b, 0.55)
         border.width: 1
         border.color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.3)
     }
@@ -35,7 +31,7 @@ Item {
         Button {
             text: "Start game"
             anchors.horizontalCenter: parent.horizontalCenter
-            onClicked: root.startGame()
+            onClicked: root.startRequested()
         }
     }
 }
