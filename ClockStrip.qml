@@ -3,7 +3,7 @@ import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 
-Row {
+RowLayout {
     id: root
     Layout.fillWidth: true
     Layout.alignment: Qt.AlignHCenter
@@ -18,13 +18,12 @@ Row {
     property string humanColor: "w"
     property string aiColor: "b"
     property color foreground: Color.popups.text
-
-    readonly property int boardWidth: 296
+    property int boardWidth: 0
 
     Rectangle {
         Layout.fillWidth: true
         Layout.preferredWidth: (root.boardWidth - Style.space(6)) / 2
-        height: Style.space(22)
+        Layout.fillHeight: true
         radius: Style.space(4)
         color: root.clockActive === root.humanColor
                ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.16)
@@ -34,7 +33,7 @@ Row {
 
         Text {
             anchors.centerIn: parent
-            color: root.clockActive === root.humanColor && root.humanClock <= 10000 ? "#ff5c54" : root.foreground
+            color: root.clockActive === root.humanColor && root.humanClock <= 10000 ? Color.urgent : root.foreground
             font.pixelSize: Style.font.body
             font.bold: root.clockActive === root.humanColor
             text: "You " + root.formatClock(root.humanClock)
@@ -44,7 +43,7 @@ Row {
     Rectangle {
         Layout.fillWidth: true
         Layout.preferredWidth: (root.boardWidth - Style.space(6)) / 2
-        height: Style.space(22)
+        Layout.fillHeight: true
         radius: Style.space(4)
         color: root.clockActive === root.aiColor
                ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.16)
@@ -54,7 +53,7 @@ Row {
 
         Text {
             anchors.centerIn: parent
-            color: root.clockActive === root.aiColor && root.aiClock <= 10000 ? "#ff5c54" : root.foreground
+            color: root.clockActive === root.aiColor && root.aiClock <= 10000 ? Color.urgent : root.foreground
             font.pixelSize: Style.font.body
             font.bold: root.clockActive === root.aiColor
             text: "AI " + root.formatClock(root.aiClock)

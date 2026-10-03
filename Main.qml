@@ -20,11 +20,28 @@ Panel {
     property bool opened: false
 
     // --- persisted settings (edited in the dropdown, applied next game) --------
-    property string humanColorSetting: "w"
-    property int chessClockSetting: 30 * 60000
-    property bool pomodoroModeSetting: true
-    property int pomodoroTimeSetting: 10
+    // Bound to the shell's settings object rather than read once in
+    // Component.onCompleted: the bar injects that object a tick after this
+    // component completes, so a one-shot read lands on empty settings and
+    // silently falls back to every default. Assigning to these would break
+    // the binding, so the dropdown handlers persist instead.
+    property string humanColorSetting: setting("humanColor", "w")
+    property int chessClockSetting: intSetting("chessClock", 30 * 60000)
+    property bool pomodoroModeSetting: boolSetting("pomodoroMode", true)
+    // pomodoroTime is stored in MINUTES, which is also the unit pomodoroPresets
+    // is expressed in (10/15/30/60/120). It was briefly treated as seconds while
+    // testing, which left those presets reading as "10s, 15s, 30s..." and put
+    // the unit in the settings label as "Every (s)". Everything converting the
+    // setting to a duration multiplies by 60 * 1000.
+    property int pomodoroTimeSetting: intSetting("pomodoroTime", 10)
+    property bool popupsSetting: boolSetting("popups", true)
     property bool settingsDirty: false
+
+    // A Lock In session ending is a sound, not a popup. The freedesktop theme's
+    // "complete" cue is the standard task-done sound and is already installed
+    // alongside libcanberra on most desktops; the test -f in soundProc keeps a
+    // missing theme a silent no-op rather than a logged pw-play error.
+    readonly property string focusSound: "/usr/share/sounds/freedesktop/stereo/complete.oga"
 
     // --- persistence -----------------------------------------------------------
     readonly property string home: Quickshell.env("HOME")
@@ -48,6 +65,12 @@ Panel {
     property bool pomodoroActive: false
     property var pomodoroStamp: 0
     property bool aiPendingPanelOpen: false
+    // Set when a session reaches zero, cleared once the AI's move lands. Gives
+    // the hover something to say in the gap between "session over" and "the AI
+    // has actually replied" -- with the panel shut that gap is however long you
+    // leave it shut. Distinct from pomodoroActive on purpose: the icon dims off
+    // the moment the session ends, so this is hover-only state.
+    property bool lockInConcluded: false
 
     // --- timed games -----------------------------------------------------------
     property var timeControl: null
@@ -62,6 +85,7 @@ Panel {
     readonly property int aiClock: humanColor === "w" ? clockB : clockW
 
     property var clockPresets: [
+        { label: "Off",    base: 0 },
         { label: "10 min", base: 10 * 60000 },
         { label: "15 min", base: 15 * 60000 },
         { label: "30 min", base: 30 * 60000 },
@@ -134,6 +158,24 @@ Panel {
     }
 
     function accountElapsed() {
+        // Pomodoro expiry is checked BEFORE the clock guards, deliberately.
+        // startPomodoro() clears clockActive, so `clockActive === ""` holds for
+        // the whole focus block and the guards below would skip this function
+        // entirely. That left pomodoroTickTimer as the only thing able to end
+        // a focus block -- a single missed or delayed tick stranded
+        // pomodoroActive = true, which kept the bar icon dimmed until some
+        // unrelated path happened to clear the flag. This runs every 100ms off
+        // clockTimer, which is unconditionally running, so it does not share
+        // that single point of failure.
+        if (pomodoroActive) {
+            if (pomodoroDuration - (Date.now() - pomodoroStamp) <= 0) {
+                pomodoroActive = false
+                onPomodoroComplete()
+                // onPomodoroComplete may have begun a clock (startAISlice does),
+                // so bail rather than account a zero-length slice below.
+                return
+            }
+        }
         if (timeControl === null || clockActive === "") return
         if (!clockShouldRun(clockActive)) return
         var now = Date.now()
@@ -190,7 +232,7 @@ Panel {
         board.blurActive = false
         pendingAiMove = null
         pomodoroActive = false
-        pomodoroTickTimer.stop()
+        lockInConcluded = false
         aiPendingPanelOpen = false
         board.selected = -1
         board.targets = []
@@ -211,17 +253,51 @@ Panel {
         notifyProc.running = true
     }
 
+    function playSound() {
+        soundProc.running = false
+        soundProc.file = root.focusSound
+        soundProc.running = true
+    }
+
     function notifyIfHidden() {
         if (opened) return
+        if (!popupsSetting) return
         if (gameOver) notifySend("OmaChess — game over", statusText)
         else if (game.turn === humanColor) notifySend("OmaChess — your move", formatClock(humanClock) + " left")
         else notifySend("OmaChess", "AI is moving…")
     }
 
+    // Settings persist through the shell's own config path rather than an
+    // out-of-band write to shell.json: the shell re-reads config here and
+    // persists it, so values keep their real JSON types and no other
+    // plugin's entry can be clobbered by a racing rewrite.
     function saveSetting(key, val) {
-        saveSettingsProc.key = key
-        saveSettingsProc.value = String(val)
-        saveSettingsProc.running = true
+        var entry = { id: root.moduleName }
+        for (var k in root.settings) if (k !== "id") entry[k] = root.settings[k]
+        entry[key] = val
+        root.settings = entry
+        if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+            root.bar.shell.updateEntryInline(root.moduleName, entry)
+    }
+
+    // Panel.setting() hands back whatever JSON held, so a value written by an
+    // older build (or by hand) can still be a string. Coerce explicitly: JS
+    // would turn "false" into true, which silently ignores a disabled setting.
+    function boolSetting(name, fallback) {
+        var v = setting(name, undefined)
+        if (v === undefined || v === null) return fallback
+        if (typeof v === "boolean") return v
+        var s = String(v).trim().toLowerCase()
+        if (s === "true" || s === "1" || s === "yes" || s === "on") return true
+        if (s === "false" || s === "0" || s === "no" || s === "off") return false
+        return fallback
+    }
+
+    function intSetting(name, fallback) {
+        var v = setting(name, undefined)
+        if (v === undefined || v === null || String(v).trim() === "") return fallback
+        var n = Number(v)
+        return isFinite(n) ? Math.round(n) : fallback
     }
 
     function buildStatePayload() {
@@ -231,12 +307,25 @@ Panel {
             humanColor: humanColor,
             gameOver: gameOver,
             statusText: statusText,
-            pomodoro: pomodoroActive ? {
-                active: true,
+            // aiPending/pendingMove used to live inside the `pomodoroActive` ternary,
+// which meant the instant onPomodoroComplete() cleared the flag the payload
+            // degraded to { active: false } and the deferred AI move was thrown
+            // away. applyState() then reset aiPendingPanelOpen to false, so any
+            // plugin reload between the timer ending and the panel being opened
+            // lost the AI's move entirely and the game sat waiting on a player
+            // who was never asked. The whole block is emitted whenever any of
+            // the four is live, and `active` is carried as its own field.
+            // lockInConcluded is in the condition for the same reason: it is set
+            // at the exact moment pomodoroActive goes false, so gating on
+            // `active` alone would emit { active: false } and drop the
+            // concluded message on the next reload.
+            pomodoro: (pomodoroActive || aiPendingPanelOpen || pendingAiMove || lockInConcluded) ? {
+                active: pomodoroActive,
                 stamp: pomodoroStamp,
                 duration: pomodoroDuration,
                 mode: pomodoroMode,
                 aiPending: aiPendingPanelOpen,
+                concluded: lockInConcluded,
                 pendingMove: pendingAiMove ? { from: pendingAiMove.from, to: pendingAiMove.to, flags: pendingAiMove.flags || [] } : null
             } : { active: false },
             clocks: timeControl ? {
@@ -279,19 +368,32 @@ Panel {
         gameOver = payload.gameOver || false
         statusText = payload.statusText || "Your move"
 
-        if (payload.pomodoro && payload.pomodoro.active) {
-            pomodoroActive = true
-            pomodoroStamp = payload.pomodoro.stamp
-            pomodoroDuration = payload.pomodoro.duration
-            pomodoroMode = payload.pomodoro.mode !== undefined ? payload.pomodoro.mode : pomodoroModeSetting
-            aiPendingPanelOpen = payload.pomodoro.aiPending || false
-            if (payload.pomodoro.pendingMove) {
-                pendingAiMove = payload.pomodoro.pendingMove
+        if (payload.pomodoro) {
+            // `active` is now just one field in the block rather than the
+            // condition guarding it, because a pending AI move outlives the
+            // focus block that deferred it: onPomodoroComplete() clears
+            // pomodoroActive but leaves aiPendingPanelOpen set until the panel
+            // is opened. Gating on `active` here would discard that move on
+            // every reload.
+            pomodoroActive = payload.pomodoro.active === true
+            if (pomodoroActive) {
+                pomodoroStamp = payload.pomodoro.stamp
+                pomodoroDuration = payload.pomodoro.duration
+                pomodoroMode = payload.pomodoro.mode !== undefined ? payload.pomodoro.mode : pomodoroModeSetting
+            } else {
+                pomodoroMode = pomodoroModeSetting
+                pomodoroDuration = pomodoroTimeSetting * 60 * 1000
             }
+            aiPendingPanelOpen = payload.pomodoro.aiPending === true
+            lockInConcluded = payload.pomodoro.concluded === true
+            pendingAiMove = payload.pomodoro.pendingMove ? payload.pomodoro.pendingMove : null
         } else {
             pomodoroActive = false
             aiPendingPanelOpen = false
+            lockInConcluded = false
             pendingAiMove = null
+            pomodoroMode = pomodoroModeSetting
+            pomodoroDuration = pomodoroTimeSetting * 60 * 1000
         }
 
         if (payload.clocks) {
@@ -315,7 +417,7 @@ Panel {
                 onPomodoroComplete()
             } else {
                 board.blurActive = true
-                board.blurTitle = "Focus time"
+                board.blurTitle = "Lock In"
                 board.blurClockText = formatPomodoro(remaining)
             }
         }
@@ -362,6 +464,11 @@ Panel {
         animating = false
         refreshBoardView()
         updateStatus()
+        // The AI's move has landed, so a pending "session concluded" message has
+        // served its purpose and the hover goes back to reporting whose turn it
+        // is. Safe to clear unconditionally: on the player's own move this is
+        // already false, since the AI's reply cleared it on the way through.
+        lockInConcluded = false
         if (!gameOver) {
             if (game.turn === humanColor) {
                 if (timeControl !== null) beginClock(humanColor)
@@ -424,21 +531,38 @@ Panel {
     function startPomodoro() {
         if (gameOver || pomodoroActive) return
         pomodoroActive = true
+        // A new session supersedes any "concluded" message still being shown.
+        lockInConcluded = false
         clockActive = ""
         pomodoroStamp = Date.now()
         board.blurActive = true
-        board.blurTitle = "Focus time"
+        board.blurTitle = "Lock In"
         board.blurClockText = formatPomodoro(pomodoroDuration)
         saveGameState()
     }
 
     function onPomodoroComplete() {
         pomodoroActive = false
+        // The icon brightens on the line above (dimmed tracks pomodoroActive),
+        // but the game has not moved on yet, so the hover needs its own state
+        // to say so. Cleared by onSlideFinished() when the AI's move lands.
+        lockInConcluded = true
         if (opened) {
+            // startAISlice(true) re-arms the blur itself and retitles it
+            // "AI thinking…", so the session overlay is correctly replaced here.
             startAISlice(true)
         } else {
             aiPendingPanelOpen = true
-            notifySend("OmaChess — Focus time over", "Your move is ready. Open the game to see it.")
+            // The board was left blurred by startPomodoro() and nothing in this
+            // branch cleared it: blurActive only ever fell back to false in
+            // endAISlice(), which cannot run until the panel is opened. So the
+            // board sat there dimmed and frozen on "Lock In 00:00" for as
+            // long as the panel stayed shut. The session is over, so drop
+            // the blur; handleClick() still refuses input while it is the AI's
+            // turn, so this cannot be mistaken for a playable position.
+            board.blurActive = false
+            board.blurClockText = ""
+            playSound()
         }
         saveGameState()
     }
@@ -517,18 +641,20 @@ Panel {
         board.blurActive = false
         pendingAiMove = null
         pomodoroActive = false
-        pomodoroTickTimer.stop()
+        lockInConcluded = false
         aiPendingPanelOpen = false
         promotionInfo = null
         board.promotion = null
         board.selected = -1
         board.targets = []
 
-        pomodoroDuration = pomodoroTimeSetting * 1000
+        pomodoroDuration = pomodoroTimeSetting * 60 * 1000
         humanColor = humanColorSetting
         pomodoroMode = pomodoroModeSetting
         if (workMs != null) pomodoroDuration = workMs
-        timeControl = { base: chessClockSetting }
+        // A zero base means no chess clock; the rest of the engine already
+        // reads a null timeControl as "untimed" and drops to a plain AI turn.
+        timeControl = chessClockSetting > 0 ? { base: chessClockSetting } : null
         clockActive = ""
         clockStamp = 0
         clockW = chessClockSetting
@@ -539,7 +665,7 @@ Panel {
         refreshBoardView()
         updateStatus()
         if (game.turn === humanColor) {
-            beginClock(humanColor)
+            if (timeControl !== null) beginClock(humanColor)
         } else {
             startAISlice(false)
         }
@@ -554,7 +680,7 @@ Panel {
         board.blurActive = false
         pendingAiMove = null
         pomodoroActive = false
-        pomodoroTickTimer.stop()
+        lockInConcluded = false
         aiPendingPanelOpen = false
         board.cancelSlide()
         board.promotion = null
@@ -568,8 +694,51 @@ Panel {
     // --- bar button -----------------------------------------------------------
     readonly property color iconTint: barForeground
 
+    // Whose turn it is, for the tooltip only. It deliberately does NOT move
+    // the icon: the bar already dots an open panel, and a dim that tracked
+    // the turn said "the ball is with the AI", which is a different thing from
+    // what the dim now means.
+    //
+    // Reads board.turnColor rather than game.turn on purpose: `game` is a
+    // plain JS object that Chess.makeMove mutates in place, and QML cannot
+    // observe property changes on a non-QObject, so a binding on game.turn
+    // fires once and never again. turnColor is a real property reassigned by
+    // refreshBoardView() after every move, so this stays reactive.
+    readonly property bool awaitingPlayer: !gameOver && board.turnColor === humanColor
+
     Component {
         id: knightIconComponent
+        // Hand-rolled metrics, mirroring OpticalGlyph.qml for a typeface that
+        // is not the bar's own. The horizontal correction is the same one
+        // OpticalGlyph applies. The vertical axis is where this glyph needs a
+        // hand, and the reason is measurable.
+        //
+        // At Style.bar.iconFont -- 13px, and not theme-overridable, since
+        // Style.qml:405-410 honors only size-horizontal/size-vertical -- the
+        // glyphs compare as follows, by rasterizing each and scanning ink rows:
+        //
+        //   Nerd Font U+F017/U+F013/U+F2A2   ink 13.0px tall, ink center
+        //                                         0.00px from line-box center
+        //   Font Awesome 7 U+265E             ink 15.0px tall, ink center
+        //                                         1.00px ABOVE line-box center
+        //
+        // The neighbouring icons and this one are both centered by line box --
+        // anchors.centerIn on a Text whose implicitHeight is the line box -- so
+        // with no nudge the knight rides exactly 1px high. In both faces
+        // leading is 0 and lineSpacing == height == ascent + descent, so this
+        // is not a line-spacing artifact.
+        //
+        // The nudge is a constant rather than a tightBoundingRect derivation
+        // like the horizontal one, and that is the point. A derived vertical
+        // offset tracks whatever glyph is in place and drifts between them,
+        // which is why the earlier attempt was reverted. A literal cannot
+        // drift, and this component only ever draws U+265E.
+        //
+        // Font.Black is kept because it selects Font Awesome's solid chess
+        // face -- the unweighted face is a hollow outline that reads far
+        // weaker than the rest of the bar. (JetBrainsMono Nerd Font, the
+        // bar's own font, has no U+265E at all, so this typeface is not
+        // optional.)
         Item {
             width: Style.bar.iconCanvas
             height: Style.bar.iconCanvas
@@ -584,7 +753,7 @@ Panel {
                 id: glyph
                 anchors.centerIn: parent
                 anchors.horizontalCenterOffset: glyph.implicitWidth / 2 - (km.tightBoundingRect.x + km.tightBoundingRect.width / 2)
-                anchors.verticalCenterOffset: glyph.baselineOffset + km.tightBoundingRect.y + km.tightBoundingRect.height / 2 - glyph.implicitHeight / 2
+                anchors.verticalCenterOffset: 1
                 text: "\u265E"
                 font.family: "Font Awesome 7 Free"
                 font.weight: Font.Black
@@ -595,11 +764,34 @@ Panel {
         }
     }
 
+    // The knight dims only while the focus timer is running, through the
+    // native WidgetButton.dimmed rather than an opacity binding on the glyph
+    // itself: that gets the bar's own dim level (0.45) and its standard 140ms
+    // fade for free, and leaves exactly one animation in play instead of the
+    // glyph's 160ms stacked on the button's 140ms.
+    //
+    // pomodoroActive is the right signal rather than "not awaitingPlayer"
+    // because those two mostly coincide -- the pomodoro only ever starts from
+    // the AI's-turn branch of onSlideFinished(), and the board is inert while
+    // it runs -- but keying off the timer is what actually describes the state.
+    // The cases where they part company: game over, and AI thinking with
+    // pomodoroMode off. Neither dims any more.
     BarIconButton {
         id: button
         anchors.fill: parent
         bar: root.bar
-        tooltipText: "Chess"
+        dimmed: pomodoroActive
+        // The countdown reads board.blurClockText rather than recomputing from
+        // Date.now(). None of pomodoroActive/pomodoroDuration/pomodoroStamp
+        // change while a session runs, so a Date.now() expression would freeze
+        // at whatever the tooltip was built with and never tick. blurClockText
+        // is rewritten every second by the tick timer, so it stays live -- and
+        // the hover shows the identical digits to the board.
+        tooltipText: pomodoroActive
+            ? "Chess — Lock in " + board.blurClockText
+            : (lockInConcluded
+               ? "Chess — Lock in session concluded"
+               : (awaitingPlayer ? "Chess — your move" : "Chess"))
         iconComponent: knightIconComponent
         onPressed: function(b) {
             if (b === Qt.LeftButton) root.toggle()
@@ -633,7 +825,7 @@ Panel {
         id: pomodoroTickTimer
         interval: 1000
         repeat: true
-        running: true
+        running: root.pomodoroActive
         onTriggered: {
             if (!pomodoroActive) return
             var remaining = pomodoroDuration - (Date.now() - pomodoroStamp)
@@ -663,26 +855,11 @@ Panel {
     }
 
     Process {
-        id: saveSettingsProc
-        property string key: ""
-        property string value: ""
-        command: {
-            var py = [
-                'import json,sys',
-                'p=sys.argv[1];vid=sys.argv[2];key=sys.argv[3];val=sys.argv[4]',
-                'd=json.load(open(p))',
-                'for sec in d.get("bar",{}).get("layout",{}).values():',
-                '    if isinstance(sec,list):',
-                '        for e in sec:',
-                '            if isinstance(e,dict) and e.get("id")==vid:',
-                '                e[key]=val',
-                'json.dump(d,open(p,"w"),indent=2)',
-                'open(p,"a").write("\\n")'
-            ]
-            return ["python3", "-c", py.join("\n"),
-                    home + "/.config/omarchy/shell.json",
-                    "veilios.omachess", key, value]
-        }
+        id: soundProc
+        property string file: ""
+        // test -f first so a desktop without the freedesktop sound theme
+        // stays quiet instead of logging a pw-play failure every focus block
+        command: ["sh", "-c", "test -f \"$1\" && exec pw-play \"$1\"", "sh", file]
     }
 
     FileView {
@@ -694,6 +871,14 @@ Panel {
         onLoadFailed: function(err) { root.applyState("") }
     }
 
+    // Appends one trace line per invocation. A Process append beats writing
+    // through a FileView because FileView.setText() silently does nothing on a
+    // view that was never loaded, which is exactly the case for a log nobody
+    // reads back through the view -- state.json only works because the shell
+    // loads it on startup. Args go through argv rather than a shell string so
+    // the line needs no quoting.
+
+
     Process {
         id: mkStateDir
         command: ["mkdir", "-p", root.stateDir]
@@ -704,13 +889,6 @@ Panel {
         AI.setEngine(Chess)
         board.slideFinished.connect(onSlideFinished)
         refreshBoardView()
-        humanColorSetting = setting("humanColor", "w")
-        chessClockSetting = setting("chessClock", 30 * 60000)
-        pomodoroModeSetting = setting("pomodoroMode", true)
-        pomodoroTimeSetting = setting("pomodoroTime", 10)
-        humanColor = humanColorSetting
-        pomodoroMode = pomodoroModeSetting
-        pomodoroDuration = pomodoroTimeSetting * 1000
         mkStateDir.running = true
     }
 
@@ -722,8 +900,14 @@ Panel {
         bar: root.bar
         open: root.opened
         focusTarget: keyCatcher
-        property int boardSquareSize: 24
-        contentWidth: panel.fittedContentWidth(Style.space(360))
+        // The board drives the panel's width, and the card is sized to the
+        // content column. Scales with the spacing/font scale, so the fit holds
+        // at any theme size.
+        property int boardSquareSize: Style.space(32)
+        // Derived from the card's own padding and border instead of a guessed
+        // constant, so the content always exactly fills the card.
+        readonly property int contentSideInset: padding + Math.max(1, Style.space(2))
+        contentWidth: panel.fittedContentWidth(panel.boardSquareSize * 8 + panel.contentSideInset * 2)
         contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight)
 
         PanelKeyCatcher {
@@ -747,9 +931,9 @@ Panel {
             }
         }
 
-ColumnLayout {
+        ColumnLayout {
             id: contentColumn
-            Layout.fillWidth: true
+            width: parent.width
             clip: true
             spacing: Style.space(4)
 
@@ -819,39 +1003,17 @@ ColumnLayout {
                 }
             }
 
-            // Settings dropdown
-            SettingsView {
-                id: settingsView
-                Layout.fillWidth: true
-                visible: settingsOpen
-                clip: true
-
-                foreground: Color.popups.text
-                fontFamily: Style.font.family
-
-                humanColorSetting: humanColorSetting
-                chessClockSetting: chessClockSetting
-                pomodoroModeSetting: pomodoroModeSetting
-                pomodoroTimeSetting: pomodoroTimeSetting
-                settingsDirty: settingsDirty
-                clockPresets: clockPresets
-
-                onHumanColorChanged: { humanColorSetting = color; saveSetting("humanColor", color); settingsDirty = true }
-                onChessClockChanged: { chessClockSetting = ms; saveSetting("chessClock", ms); settingsDirty = true }
-                onPomodoroModeChanged: { pomodoroModeSetting = enabled; saveSetting("pomodoroMode", enabled); settingsDirty = true }
-                onPomodoroTimeChanged: { pomodoroTimeSetting = seconds; saveSetting("pomodoroTime", seconds); settingsDirty = true }
-            }
-
             // Clock strip
             ClockStrip {
                 id: clockStrip
                 Layout.fillWidth: true
-                timeControl: timeControl
-                humanClock: humanClock
-                aiClock: aiClock
-                clockActive: clockActive
-                humanColor: humanColor
-                aiColor: aiColor
+                boardWidth: panel.boardSquareSize * 8
+                timeControl: root.timeControl
+                humanClock: root.humanClock
+                aiClock: root.aiClock
+                clockActive: root.clockActive
+                humanColor: root.humanColor
+                aiColor: root.aiColor
                 foreground: Color.popups.text
             }
 
@@ -867,22 +1029,73 @@ ColumnLayout {
                     height: panel.boardSquareSize * 8
                     square: panel.boardSquareSize
                     flipped: humanColor === "b"
-                    interactive: !animating && !aiThinking && !gameOver && !setupOpen && !pomodoroActive
-                    onClicked: handleClick(sq)
-                    onPromoChosen: promoChosen(piece)
-                    onPromoCancelled: promoCancelled()
+                    blurOverlay: setupOpen || settingsOpen
+                    interactive: !animating && !aiThinking && !gameOver && !setupOpen && !pomodoroActive && !settingsOpen
+                    onClicked: function(sq) { root.handleClick(sq) }
+                    onPromotionChosen: function(piece) { root.promoChosen(piece) }
+                    onPromotionCancelled: root.promoCancelled()
                     clip: true
                 }
-            }
 
-            // Setup overlay
-            SetupOverlay {
-                id: setupOverlay
-                Layout.alignment: Qt.AlignHCenter
-                Layout.preferredWidth: panel.boardSquareSize * 8
-                Layout.preferredHeight: panel.boardSquareSize * 8
-                visible: setupOpen
-                onStartGame: { startGame(null); setupOpen = false }
+                // Settings overlay. Sits on the board like the setup overlay
+                // rather than pushing the panel taller. No scroller: a
+                // Flickable grabs the pointer to prepare for dragging, which
+                // swallowed clicks on the buttons underneath whenever the hand
+                // moved even a pixel between press and release. It fits because
+                // SettingsView keeps its labels inline and its presets to bare
+                // numbers -- see the note at the top of that file.
+                Item {
+                    id: settingsOverlay
+                    anchors.fill: parent
+                    visible: settingsOpen
+                    z: 10
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: Style.cornerRadius
+                        color: Qt.rgba(Color.popups.background.r, Color.popups.background.g, Color.popups.background.b, 0.88)
+                        border.width: 1
+                        border.color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.3)
+                    }
+
+                    SettingsView {
+                        id: settingsView
+                        width: parent.width - Style.space(12)
+                        x: Style.space(6)
+                        // Centre the controls in the board, but never above the
+                        // top edge: a taller font scale overflows downward, and
+                        // keeping the first sections on screen matters more than
+                        // the balance.
+                        y: Math.max(Style.space(6),
+                                    (settingsOverlay.height - implicitHeight) / 2)
+
+                        foreground: Color.popups.text
+                        fontFamily: Style.font.family
+
+                        humanColorSetting: root.humanColorSetting
+                        chessClockSetting: root.chessClockSetting
+                        pomodoroModeSetting: root.pomodoroModeSetting
+                        pomodoroTimeSetting: root.pomodoroTimeSetting
+                        popupsSetting: root.popupsSetting
+                        settingsDirty: root.settingsDirty
+                        clockPresets: root.clockPresets
+
+                        onHumanColorChanged: function(color) { root.saveSetting("humanColor", color); root.settingsDirty = true }
+                        onChessClockChanged: function(ms) { root.saveSetting("chessClock", ms); root.settingsDirty = true }
+                        onPomodoroModeChanged: function(enabled) { root.saveSetting("pomodoroMode", enabled); root.settingsDirty = true }
+                        onPomodoroTimeChanged: function(minutes) { root.saveSetting("pomodoroTime", minutes); root.settingsDirty = true }
+                        onPopupsChanged: function(enabled) { root.saveSetting("popups", enabled); root.settingsDirty = true }
+                    }
+                }
+
+                // Setup overlay
+                SetupOverlay {
+                    id: setupOverlay
+                    anchors.fill: parent
+                    visible: setupOpen
+                    z: 10
+                    onStartRequested: { root.startGame(null); setupOpen = false }
+                }
             }
         }
     }
