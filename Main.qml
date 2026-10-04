@@ -17,7 +17,6 @@ Panel {
     // --- UI state --------------------------------------------------------------
     property bool settingsOpen: false
     property bool setupOpen: false
-    property bool opened: false
 
     // --- persisted settings (edited in the dropdown, applied next game) --------
     // Bound to the shell's settings object rather than read once in
@@ -59,6 +58,10 @@ Panel {
     property string statusText: "Your move"
     property var promotionInfo: null
 
+    // OS account name, resolved once. Results read as "<name> won" rather than
+    // "You", so the panel speaks in terms of whoever is actually logged in.
+    readonly property string userName: Quickshell.env("USER") || "Player"
+
     // --- pomodoro (work period between moves) ----------------------------------
     property bool pomodoroMode: false
     property int pomodoroDuration: 10000
@@ -71,6 +74,28 @@ Panel {
     // leave it shut. Distinct from pomodoroActive on purpose: the icon dims off
     // the moment the session ends, so this is hover-only state.
     property bool lockInConcluded: false
+
+    // ---- undo ---------------------------------------------------------------
+    // 0 disables undo entirely; 3/5/10 cap it; -1 means unlimited (shown as an
+    // infinity sign in SettingsView). Unlimited is the default -- the cap is
+    // there for people who want the friction, not as a default.
+    property int undoLimitSetting: intSetting("undoLimit", -1)
+
+    // Undo presses spent on the current game. Reset by startGame() and carried
+    // through state.json so a shell restart cannot hand back the allowance.
+    property int undosUsed: 0
+
+    // One FEN per ply, history[0] being the position the game started from.
+    //
+    // This deliberately does NOT use ChessEngine's undoMove(). That walks the
+    // engine's internal move stack, which lives only in memory -- so a reload
+    // would silently drop the ability to undo. Storing positions as FENs makes
+    // the history survive a restart (and is cheap: a long game is a few tens of
+    // KB) and makes undo a matter of rebuilding the position rather than
+    // unwinding internal bookkeeping. stateFromFen/fenOf round-trip exactly,
+    // castling rights, en passant square and side to move included, which is
+    // what the correctness of this rests on.
+    property var history: []
 
     // --- timed games -----------------------------------------------------------
     property var timeControl: null
@@ -114,12 +139,16 @@ Panel {
         board.lastTo = last ? last.to : -1
     }
 
+    function winnerName(sideColor) {
+        return sideColor === humanColor ? userName : "AI"
+    }
+
     function updateStatus() {
         var res = Chess.resultOf(game)
         gameOver = res.type !== "none"
         if (gameOver) {
             if (res.type === "checkmate") {
-                statusText = (res.winner === "w" ? "White" : "Black") + " wins by checkmate"
+                statusText = winnerName(res.winner) + " wins by checkmate"
             } else if (res.type === "stalemate") {
                 statusText = "Draw — stalemate"
             } else if (res.type === "drawRepetition") {
@@ -130,7 +159,7 @@ Panel {
                 statusText = "Draw — insufficient material"
             }
         } else {
-            statusText = game.turn === humanColor ? "Your move" : "Thinking…"
+            statusText = game.turn === humanColor ? "Your move" : "AI thinking…"
         }
     }
 
@@ -242,7 +271,7 @@ Panel {
         if (!canMateMaterial(winner)) {
             statusText = "Draw — " + (side === "w" ? "White" : "Black") + " ran out of time (insufficient material)"
         } else {
-            statusText = (winner === "w" ? "White" : "Black") + " wins on time"
+            statusText = winnerName(winner) + " wins on time"
         }
         notifyIfHidden()
     }
@@ -304,6 +333,13 @@ Panel {
         var p = {
             version: 1,
             fen: Chess.fenOf(game),
+            // Undo history. Unconditional (unlike the pomodoro block below,
+            // which is only emitted when something in it is live) because the
+            // positions are game state in their own right -- dropping them would
+            // quietly remove undo after a restart, which is the opposite of what
+            // persisting them is for.
+            history: history,
+            undosUsed: undosUsed,
             humanColor: humanColor,
             gameOver: gameOver,
             statusText: statusText,
@@ -363,6 +399,15 @@ Panel {
         if (payload.fen) {
             game = Chess.stateFromFen(payload.fen)
         }
+
+        // Restore the position history for undo. A save written before undo
+        // existed has no history key at all, so fall back to a single-entry
+        // history of the current position: undo then simply reads as
+        // unavailable, which is honest, rather than rewinding into nowhere.
+        history = (payload.history && payload.history.length)
+            ? payload.history.slice(0)
+            : [Chess.fenOf(game)]
+        undosUsed = typeof payload.undosUsed === "number" ? payload.undosUsed : 0
 
         humanColor = payload.humanColor || "w"
         gameOver = payload.gameOver || false
@@ -446,6 +491,9 @@ Panel {
             rookChar = prev.charAt(rookFrom)
         }
         Chess.makeMove(game, move)
+        // One entry per ply, for both sides' moves, since the position after
+        // this move is exactly what undo may need to return to.
+        history = history.concat([Chess.fenOf(game)])
         board.selected = -1
         board.targets = []
         if (board.promotion) board.promotion = null
@@ -634,6 +682,10 @@ Panel {
 
     function startGame(workMs) {
         game = Chess.stateFromFen(Chess.START_FEN)
+        // Seed the position history with where the game starts, so undo has a
+        // position to return to even before the first move is played.
+        history = [Chess.fenOf(game)]
+        undosUsed = 0
         board.cancelSlide()
         animating = false
         aiThinking = false
@@ -672,7 +724,7 @@ Panel {
         saveGameState()
     }
 
-    function resign() {
+    function forfeit() {
         gameOver = true
         aiThinking = false
         animating = false
@@ -686,8 +738,88 @@ Panel {
         board.promotion = null
         board.selected = -1
         board.targets = []
-        statusText = "You resigned"
+        statusText = "AI won"
         stopClocks()
+        saveGameState()
+    }
+
+    // --- undo ----------------------------------------------------------------
+    // Why the button is unavailable, in the player's terms. Silent when undo is
+    // simply available, so the tooltip only ever explains a dead button.
+    function undoTooltip() {
+        if (undoLimitSetting === 0) return "Undo is off — change it in settings"
+        if (gameOver) return "Undo — game is over"
+        if (undoLimitSetting > 0 && undosUsed >= undoLimitSetting)
+            return "Undo limit reached for this game"
+        if (pomodoroActive || aiThinking || animating) return "Undo — wait for the AI"
+        if (!canUndo()) return "Undo — nothing to take back yet"
+        return "Undo your last move"
+    }
+
+    // True when an undo would do something. Kept as a function rather than a
+    // stored flag so the button's enabled state and the guard inside onClicked
+    // can never disagree.
+    function canUndo() {
+        if (gameOver || pomodoroActive || aiThinking || animating) return false
+        if (board.promotion !== null || promotionInfo !== null) return false
+        if (undoLimitSetting === 0) return false
+        if (undoLimitSetting > 0 && undosUsed >= undoLimitSetting) return false
+
+        // Whose turn it is decides how far back a single undo reaches, because
+        // undo always means "the move I just made". If it is the AI's turn, the
+        // last ply is the human's own move and one step back undoes exactly
+        // that. If it is the human's turn, the last ply is the AI's reply, so
+        // stepping back only once would undo the AI rather than the human.
+        return game.turn === humanColor ? history.length >= 3 : history.length >= 2
+    }
+
+    function undoMove() {
+        if (!canUndo()) return
+
+        // Same two cases as canUndo(): reach the position just before the
+        // human's last move. In both branches the resulting position has the
+        // human to move, which is what makes an undo feel like "my turn again".
+        var rewind = game.turn === humanColor ? 2 : 1
+        var target = history.length - 1 - rewind
+        if (target < 0) return
+
+        // Drop any in-flight AI or focus work first. A pending reply belongs to
+        // the position being discarded, so leaving it running would let the AI
+        // answer a board that no longer exists.
+        aiTimer.stop()
+        aiSliceTimer.stop()
+        aiThinking = false
+        animating = false
+        pendingAiMove = null
+        aiPendingPanelOpen = false
+        pomodoroActive = false
+        lockInConcluded = false
+        board.blurActive = false
+        board.blurClockText = ""
+        board.cancelSlide()
+        promotionInfo = null
+        board.promotion = null
+        board.selected = -1
+        board.targets = []
+
+        // The undo allowance is spent per press, not per ply: rewind may walk
+        // back two plies but it is still the single move the player took back.
+        undosUsed++
+
+        // Rebuild rather than unwind, then truncate so the discarded positions
+        // cannot be returned to by a second undo.
+        game = Chess.stateFromFen(history[target])
+        history = history.slice(0, target + 1)
+
+        // Clocks are re-based rather than rewound: the time already spent is
+        // gone, and there is no per-ply snapshot to restore it from. The run is
+        // stopped so the next onSlideFinished picks the human's clock back up.
+        stopClocks()
+        clockActive = ""
+
+        refreshBoardView()
+        updateStatus()
+        notifyIfHidden()
         saveGameState()
     }
 
@@ -958,17 +1090,28 @@ Panel {
                 Item { Layout.fillWidth: true }
 
                 Button {
-                    id: newButton
-                    text: "New"
-                    tooltipText: "New game"
-                    onClicked: { setupOpen = true; settingsOpen = false }
+                    id: undoButton
+                    text: "Undo"
+                    // qs.Ui.Button has no enabled state to lean on, so
+                    // availability is carried by the label colour and enforced
+                    // again in onClicked. Muted rather than hidden: an absent
+                    // button reads as a layout bug, a greyed one reads as "off".
+                    foreground: canUndo() ? Color.foreground : Color.muted
+                    tooltipText: undoTooltip()
+                    onClicked: function() { if (canUndo()) undoMove() }
                 }
 
+                // One slot that offers whichever action still applies. While the
+                // game is live the only thing left to do to it is forfeit; once it
+                // is decided, the same slot becomes the prompt to start another.
                 Button {
-                    id: resignButton
-                    text: "Resign"
-                    tooltipText: "Resign the game"
-                    onClicked: resign()
+                    id: endGameButton
+                    text: gameOver ? "New" : "Forfeit"
+                    tooltipText: gameOver ? "New game" : "Forfeit the game"
+                    onClicked: {
+                        if (gameOver) { setupOpen = true; settingsOpen = false }
+                        else forfeit()
+                    }
                 }
 
                 Rectangle {
@@ -1077,6 +1220,7 @@ Panel {
                         pomodoroModeSetting: root.pomodoroModeSetting
                         pomodoroTimeSetting: root.pomodoroTimeSetting
                         popupsSetting: root.popupsSetting
+                        undoLimitSetting: root.undoLimitSetting
                         settingsDirty: root.settingsDirty
                         clockPresets: root.clockPresets
 
@@ -1085,6 +1229,7 @@ Panel {
                         onPomodoroModeChanged: function(enabled) { root.saveSetting("pomodoroMode", enabled); root.settingsDirty = true }
                         onPomodoroTimeChanged: function(minutes) { root.saveSetting("pomodoroTime", minutes); root.settingsDirty = true }
                         onPopupsChanged: function(enabled) { root.saveSetting("popups", enabled); root.settingsDirty = true }
+                        onUndoLimitChanged: function(value) { root.saveSetting("undoLimit", value); root.settingsDirty = true }
                     }
                 }
 
@@ -1116,18 +1261,4 @@ Panel {
         }
     }
 
-    function toggle() {
-        if (opened) close()
-        else open()
     }
-
-    function open() {
-        opened = true
-        controller.show()
-    }
-
-    function close() {
-        controller.hide()
-        opened = false
-    }
-}

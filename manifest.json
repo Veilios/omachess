@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "veilios",
   "license": "MIT",
-  "description": "Chess against a built-in AI, in a bar panel. Full rules (castling, en passant, promotion), theme-drawn board, undo and resign. Summon with: omarchy-shell shell toggle veilios.omachess",
+  "description": "Chess against a built-in AI, in a bar panel. Full rules (castling, en passant, promotion), theme-drawn board, undo and forfeit. Summon with: omarchy-shell shell toggle veilios.omachess",
   "kinds": [
     "bar-widget"
   ],

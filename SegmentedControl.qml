@@ -79,7 +79,26 @@ Item {
                     readonly property bool active: index === root.currentIndex
                     readonly property real labelW: segText.implicitWidth
 
-                    width: segText.implicitWidth + root.padH * 2
+                    // A model entry may ask for a minimum width in characters
+                    // (widthChars: 2). Without it a segment is sized to its own
+                    // label, which leaves a single-glyph option like "∞" in a
+                    // cramped pill next to roomier numeric ones. Measuring the
+                    // request with this segment's own probe keeps it correct at
+                    // any font size or theme scale -- no hard-coded pixels.
+                    readonly property bool sizedByChars: modelData && modelData.widthChars !== undefined
+                    readonly property real targetW: segment.sizedByChars
+                        ? widthProbe.implicitWidth
+                        : segText.implicitWidth
+
+                    Text {
+                        id: widthProbe
+                        visible: false
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                        text: "0".repeat(Math.max(1, segment.modelData.widthChars || 1))
+                    }
+
+                    width: Math.max(segment.targetW, segText.implicitWidth) + root.padH * 2
                     height: row.height
 
                     // Active fill, inset by 2px so the bar's own border and

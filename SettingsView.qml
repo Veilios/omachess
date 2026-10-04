@@ -27,6 +27,7 @@ Column {
     property bool pomodoroModeSetting: true
     property int pomodoroTimeSetting: 10
     property bool popupsSetting: true
+    property int undoLimitSetting: -1
     property bool settingsDirty: false
     property var clockPresets: []
 
@@ -35,9 +36,25 @@ Column {
     signal pomodoroModeChanged(bool enabled)
     signal pomodoroTimeChanged(int minutes)
     signal popupsChanged(bool enabled)
+    signal undoLimitChanged(int value)
 
     readonly property color faint: Qt.darker(foreground, 1.1)
     readonly property var pomodoroPresets: [10, 15, 30, 60, 120]
+
+    // 0 is Off, -1 is unlimited. The unlimited option is labelled with the
+    // infinity sign rather than the word, purely to keep the bar narrow enough
+    // not to wrap -- same reasoning as dropping the "min" suffix from the
+    // numeric presets.
+    readonly property var undoModel: [
+        { label: "Off", value: 0 },
+        { label: "3", value: 3 },
+        { label: "5", value: 5 },
+        { label: "10", value: 10 },
+        // widthChars gives the infinity sign the same room as the two-digit
+        // "10" beside it; a lone narrow glyph otherwise sits in a pill that is
+        // visibly tighter than its neighbours.
+        { label: "∞", value: -1, widthChars: 2 }
+    ]
 
     // Every label shares one width so the controls line up on the right. The
     // widest plain-text label is named here and measured once: TextMetrics.width
@@ -270,6 +287,35 @@ Column {
             model: root.onOffModel
             currentIndex: root.indexOfValue(root.onOffModel, root.popupsSetting)
             onActivated: function(index) { root.popupsChanged(root.onOffModel[index].value) }
+        }
+    }
+
+    // ---- Undo ---------------------------------------------------------------
+    // How many moves the player may take back in one game.
+    Item {
+        width: parent.width
+        height: undoSeg.implicitHeight
+
+        Text {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.labelWidth - Style.space(6)
+            horizontalAlignment: Text.AlignLeft
+            verticalAlignment: Text.AlignVCenter
+            color: root.faint
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 1
+            text: "Undo"
+        }
+
+        SegmentedControl {
+            id: undoSeg
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            model: root.undoModel
+            currentIndex: root.indexOfValue(root.undoModel, root.undoLimitSetting)
+            onActivated: function(index) { root.undoLimitChanged(root.undoModel[index].value) }
         }
     }
 }
