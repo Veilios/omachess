@@ -8,6 +8,9 @@ chess against a built-in AI, with a **Lock In** timer between moves: once you
 play, the board blurs and the AI thinks behind it for a set focus block. The
 board stays unusable until it finishes.
 
+Everything is drawn from your active shell theme — board, pieces, controls —
+so it fits whatever desktop you've put together rather than imposing its own.
+
 ![A game in progress](screenshots/mid-game.png) ![Lock In running while the AI thinks](screenshots/lock-in.png)
 
 ## Install
