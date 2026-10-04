@@ -1,7 +1,9 @@
 # OmaChess
 
 Chess against a built-in AI, in your bar. Full rules, undo, clocks, and a
-focus timer that makes you sit with your move.
+focus timer that makes you sit with your move. Everything is drawn from your
+active shell theme — board, pieces, controls — so it fits whatever desktop
+you've put together rather than imposing its own.
 
 ![A game in progress](screenshots/mid-game.png)
 
