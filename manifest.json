@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "veilios",
   "license": "MIT",
-  "description": "Chess against a built-in AI, in a bar panel. Full rules (castling, en passant, promotion), theme-drawn board, undo and forfeit. Summon with: omarchy-shell shell toggle veilios.omachess",
+  "description": "Chess in your bar, built around the pomodoro method: make a move, then a Lock In timer turns the wait into a focus block while the AI replies. Full rules, clocks and undo, drawn from your theme. Summon with: omarchy-shell shell toggle veilios.omachess",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "OmaChess",
-    "description": "Play a game of chess against the computer in a bar panel",
+    "description": "Chess as a focus block: play a move, lock in, and the AI replies",
     "category": "Fun",
     "allowMultiple": false,
     "defaultSection": "right"
