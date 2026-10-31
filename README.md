@@ -20,6 +20,15 @@ omarchy plugin add https://github.com/Veilios/omachess.git
 omarchy restart shell
 ```
 
+Nothing to install beyond that — it runs on the Quickshell and Qt that Omarchy
+already ships.
+
+## Remove
+
+```sh
+omarchy plugin remove veilios.omachess
+```
+
 ## Play
 
 Click the knight in the bar, or summon it from anywhere:
