@@ -11,7 +11,7 @@ board stays unusable until it finishes.
 Everything is drawn from your active shell theme — board, pieces, controls —
 so it fits whatever desktop you've put together rather than imposing its own.
 
-![A game in progress](screenshots/mid-game.png) ![Lock In running while the AI thinks](screenshots/lock-in.png)
+![A game in progress](screenshots/board.png) ![Lock In running while the AI thinks](screenshots/lock-in.png) ![Settings](screenshots/settings.png)
 
 ## Install
 
